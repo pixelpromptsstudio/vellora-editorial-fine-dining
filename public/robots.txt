@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://pixelpromptsstudio.github.io/vellora-editorial-fine-dining/sitemap.xml

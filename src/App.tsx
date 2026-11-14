@@ -21,11 +21,13 @@ import {
   X,
 } from "lucide-react";
 import {
+  getLocalDateString,
   reservationApi,
   type Reservation,
   type SeatingArea,
   type TimeSlot,
 } from "./services/reservationApi";
+import { siteConfig } from "./config/siteConfig";
 
 const navLinks = [
   { label: "Menu", href: "#menu" },
@@ -130,13 +132,13 @@ function BrandMark() {
   return (
     <span className="flex items-center gap-3">
       <span className="grid h-11 w-11 place-items-center rounded-full border border-[#c8ad72]/50 bg-[#191714] text-[#fdf8ed] shadow-[0_0_0_6px_rgba(200,173,114,0.08)]">
-        <ChefHat size={20} strokeWidth={1.35} />
+        <ChefHat size={20} strokeWidth={1.35} aria-hidden="true" />
       </span>
       <span>
         <span className="block font-serif text-2xl font-semibold tracking-[0.18em] text-current">
           VELLORA
         </span>
-        <span className="block text-[10px] font-medium uppercase tracking-[0.34em] text-current/55">
+        <span className="block text-[10px] font-medium uppercase tracking-[0.34em] text-current/75">
           Fine Dining
         </span>
       </span>
@@ -144,11 +146,28 @@ function BrandMark() {
   );
 }
 
+const THEME_STORAGE_KEY = "vellora_theme";
+
+function getInitialTheme(): "evening" | "daylight" {
+  try {
+    const stored = localStorage.getItem(THEME_STORAGE_KEY);
+    return stored === "daylight" ? "daylight" : "evening";
+  } catch {
+    return "evening";
+  }
+}
+
+function saveThemePreference(nextTheme: "evening" | "daylight"): void {
+  try {
+    localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
+  } catch {
+    // Ignore storage errors in restricted browsing contexts
+  }
+}
+
 export default function App() {
   // Theme state: evening (dark ambient) vs daylight (light warm editorial)
-  const [theme, setTheme] = useState<"evening" | "daylight">(() => {
-    return (localStorage.getItem("vellora_theme") as "evening" | "daylight") || "evening";
-  });
+  const [theme, setTheme] = useState<"evening" | "daylight">(getInitialTheme);
 
   const [mobileOpen, setMobileOpen] = useState(false);
   const [myBookingsOpen, setMyBookingsOpen] = useState(false);
@@ -160,7 +179,7 @@ export default function App() {
   const [cancellingId, setCancellingId] = useState<string | null>(null);
 
   // Reservation Form State
-  const tomorrowStr = new Date(Date.now() + 86400000).toISOString().split("T")[0];
+  const tomorrowStr = getLocalDateString(1);
   const [resName, setResName] = useState("");
   const [resEmail, setResEmail] = useState("");
   const [resPhone, setResPhone] = useState("");
@@ -188,29 +207,50 @@ export default function App() {
   const toggleTheme = () => {
     const nextTheme = theme === "evening" ? "daylight" : "evening";
     setTheme(nextTheme);
-    localStorage.setItem("vellora_theme", nextTheme);
+    saveThemePreference(nextTheme);
   };
 
   // Load existing reservations on mount
   useEffect(() => {
-    reservationApi.getReservations().then(setReservations);
+    let active = true;
+    reservationApi
+      .getReservations()
+      .then((items) => {
+        if (active) setReservations(items);
+      })
+      .catch((err) => {
+        console.error("Failed to load reservations", err);
+      });
+    return () => {
+      active = false;
+    };
   }, []);
 
-  // Fetch dynamic available slots whenever date changes
+  // Fetch dynamic available slots whenever date or reservations change
   useEffect(() => {
     let isMounted = true;
     setLoadingSlots(true);
-    reservationApi.getAvailableSlots(resDate).then((slots) => {
-      if (isMounted) {
+    reservationApi
+      .getAvailableSlots(resDate)
+      .then((slots) => {
+        if (!isMounted) return;
         setTimeSlots(slots);
-        setLoadingSlots(false);
-        const isStillValid = slots.some((s) => s.time === selectedTime && s.status !== "booked");
-        if (!isStillValid) {
+        setSelectedTime((prevTime) => {
+          const isStillValid = slots.some((s) => s.time === prevTime && s.status !== "booked");
+          if (isStillValid) return prevTime;
           const firstAvailable = slots.find((s) => s.status !== "booked");
-          setSelectedTime(firstAvailable ? firstAvailable.time : "");
+          return firstAvailable ? firstAvailable.time : "";
+        });
+      })
+      .catch((err) => {
+        if (isMounted) {
+          console.error("Failed to load available time slots", err);
+          setFormError("Unable to load available time slots. Please refresh and try again.");
         }
-      }
-    });
+      })
+      .finally(() => {
+        if (isMounted) setLoadingSlots(false);
+      });
     return () => {
       isMounted = false;
     };
@@ -222,8 +262,18 @@ export default function App() {
 
   useEffect(() => {
     document.body.style.overflow = mobileOpen || myBookingsOpen ? "hidden" : "";
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setMobileOpen(false);
+        setMyBookingsOpen(false);
+      }
+    };
+    if (mobileOpen || myBookingsOpen) {
+      window.addEventListener("keydown", handleKeyDown);
+    }
     return () => {
       document.body.style.overflow = "";
+      window.removeEventListener("keydown", handleKeyDown);
     };
   }, [mobileOpen, myBookingsOpen]);
 
@@ -258,7 +308,11 @@ export default function App() {
       setResPhone("");
       setResNotes("");
     } catch (err) {
-      setFormError("Unable to process reservation. Please try again.");
+      setFormError(
+        err instanceof Error && err.message
+          ? err.message
+          : "Unable to process reservation. Please try again."
+      );
     } finally {
       setIsSubmitting(false);
     }
@@ -269,6 +323,12 @@ export default function App() {
     try {
       const updated = await reservationApi.cancelReservation(id);
       setReservations(updated);
+    } catch (err) {
+      setFormError(
+        err instanceof Error && err.message
+          ? err.message
+          : "Unable to cancel reservation. Please try again."
+      );
     } finally {
       setCancellingId(null);
     }
@@ -276,7 +336,7 @@ export default function App() {
 
   const isDaylight = theme === "daylight";
 
-  // Harmonized Theme Color Tokens
+  // Harmonized Theme Color Tokens (WCAG AA compliant in both modes)
   const bgMain = isDaylight ? "bg-[#faf7f0] text-[#2c2720]" : "bg-[#191714] text-[#fdf8ed]";
   const headerBg = isDaylight
     ? "bg-[#faf7f0]/90 border-black/10 text-[#2c2720]"
@@ -289,16 +349,17 @@ export default function App() {
     ? "bg-white text-[#2c2720] border border-black/10 shadow-xl"
     : "bg-[#1f1d19] text-[#fdf8ed] border border-white/10 shadow-2xl";
   const footerBg = isDaylight ? "bg-[#23201b] text-[#fdf8ed]" : "bg-[#12100e] text-[#fdf8ed]";
-  const accentGold = isDaylight ? "text-[#9e7d3b]" : "text-[#c8ad72]";
+  const accentGold = isDaylight ? "text-[#735824]" : "text-[#c8ad72]";
+  const accentSage = isDaylight ? "text-[#4b5e43]" : "text-[#8ea384]";
   const btnGold = isDaylight
-    ? "bg-[#9e7d3b] text-white hover:bg-[#86682e]"
+    ? "bg-[#785c23] text-white hover:bg-[#634b1b]"
     : "bg-[#c8ad72] text-[#191714] hover:bg-[#ecd28e]";
 
   const formInputStyle = isDaylight
-    ? "border-black/15 bg-black/[0.03] text-[#2c2720] placeholder:text-[#2c2720]/45 focus:border-[#9e7d3b]"
-    : "border-white/15 bg-white/[0.05] text-white placeholder:text-white/40 focus:border-[#c8ad72]";
+    ? "border-black/20 bg-black/[0.03] text-[#2c2720] placeholder:text-[#2c2720]/60 focus:border-[#785c23]"
+    : "border-white/15 bg-white/[0.05] text-white placeholder:text-white/50 focus:border-[#c8ad72]";
   const selectStyle = isDaylight
-    ? "bg-white border-black/15 text-[#2c2720] focus:border-[#9e7d3b]"
+    ? "bg-white border-black/20 text-[#2c2720] focus:border-[#785c23]"
     : "bg-[#191714] border-white/15 text-white focus:border-[#c8ad72]";
 
   const confirmedCount = reservations.filter((r) => r.status === "confirmed").length;
@@ -314,7 +375,7 @@ export default function App() {
             <BrandMark />
           </a>
 
-          <nav className="hidden items-center gap-8 lg:flex">
+          <nav aria-label="Primary navigation" className="hidden items-center gap-8 lg:flex">
             {navLinks.map((link) => (
               <a
                 key={link.href}
@@ -329,24 +390,30 @@ export default function App() {
           <div className="hidden items-center gap-4 lg:flex">
             {/* Atmosphere Theme Switcher Toggle */}
             <button
+              type="button"
               onClick={toggleTheme}
+              aria-pressed={isDaylight}
+              aria-label="Toggle atmosphere theme"
               className={`flex items-center gap-2 rounded-full border px-4 py-2.5 text-[11px] font-bold uppercase tracking-[0.2em] transition ${
                 isDaylight
-                  ? "border-[#9e7d3b]/40 bg-[#9e7d3b]/10 text-[#735824] hover:bg-[#9e7d3b]/20"
+                  ? "border-[#785c23]/40 bg-[#785c23]/10 text-[#735824] hover:bg-[#785c23]/20"
                   : "border-[#c8ad72]/45 bg-[#c8ad72]/10 text-[#f8e8bf] hover:bg-[#c8ad72]/20"
               }`}
               title="Toggle Atmosphere Theme"
             >
-              {isDaylight ? <Sun size={15} className="text-[#9e7d3b]" /> : <Moon size={15} className="text-[#c8ad72]" />}
+              {isDaylight ? <Sun size={15} aria-hidden="true" className="text-[#735824]" /> : <Moon size={15} aria-hidden="true" className="text-[#c8ad72]" />}
               <span>{isDaylight ? "Daylight" : "Evening"}</span>
             </button>
 
             {/* My Bookings Button */}
             <button
+              type="button"
               onClick={() => setMyBookingsOpen(true)}
+              aria-expanded={myBookingsOpen}
+              aria-haspopup="dialog"
               className="relative flex items-center gap-2 rounded-full border border-current/20 px-4 py-2.5 text-[11px] font-bold uppercase tracking-[0.2em] transition hover:bg-current/10"
             >
-              <Calendar size={15} />
+              <Calendar size={15} aria-hidden="true" />
               <span>Bookings</span>
               {confirmedCount > 0 && (
                 <span className="grid h-5 w-5 place-items-center rounded-full bg-[#c8ad72] text-[10px] font-extrabold text-[#191714]">
@@ -365,18 +432,23 @@ export default function App() {
 
           <div className="flex items-center gap-3 lg:hidden">
             <button
+              type="button"
               onClick={toggleTheme}
+              aria-pressed={isDaylight}
               className="p-2 text-current opacity-80 hover:opacity-100"
               aria-label="Toggle theme"
             >
-              {isDaylight ? <Sun size={22} /> : <Moon size={22} />}
+              {isDaylight ? <Sun size={22} aria-hidden="true" /> : <Moon size={22} aria-hidden="true" />}
             </button>
             <button
+              type="button"
               className="p-1"
               onClick={() => setMobileOpen(true)}
+              aria-expanded={mobileOpen}
+              aria-haspopup="dialog"
               aria-label="Open menu"
             >
-              <MenuIcon size={28} strokeWidth={1.4} />
+              <MenuIcon size={28} strokeWidth={1.4} aria-hidden="true" />
             </button>
           </div>
         </div>
@@ -385,6 +457,9 @@ export default function App() {
       {/* Mobile Drawer Navigation */}
       {mobileOpen && (
         <motion.div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Mobile navigation"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
@@ -392,11 +467,11 @@ export default function App() {
         >
           <div className="flex items-center justify-between">
             <BrandMark />
-            <button onClick={() => setMobileOpen(false)} aria-label="Close menu">
-              <X size={28} strokeWidth={1.4} />
+            <button type="button" onClick={() => setMobileOpen(false)} aria-label="Close menu">
+              <X size={28} strokeWidth={1.4} aria-hidden="true" />
             </button>
           </div>
-          <nav className="mt-12 flex flex-col gap-6">
+          <nav aria-label="Mobile navigation" className="mt-12 flex flex-col gap-6">
             {navLinks.map((link) => (
               <a
                 key={link.href}
@@ -409,6 +484,7 @@ export default function App() {
             ))}
 
             <button
+              type="button"
               onClick={() => {
                 setMobileOpen(false);
                 setMyBookingsOpen(true);
@@ -434,7 +510,12 @@ export default function App() {
 
       {/* "My Bookings" Slide-over Modal / Drawer */}
       {myBookingsOpen && (
-        <div className="fixed inset-0 z-[80] flex justify-end bg-black/60 backdrop-blur-md">
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="bookings-drawer-title"
+          className="fixed inset-0 z-[80] flex justify-end bg-black/60 backdrop-blur-md"
+        >
           <motion.div
             initial={{ x: "100%" }}
             animate={{ x: 0 }}
@@ -444,14 +525,16 @@ export default function App() {
           >
             <div className="flex items-center justify-between border-b border-white/10 pb-5">
               <div className="flex items-center gap-3">
-                <Calendar className="text-[#c8ad72]" size={24} />
-                <h3 className="font-serif text-2xl font-medium">Your Reservations</h3>
+                <Calendar className="text-[#c8ad72]" size={24} aria-hidden="true" />
+                <h3 id="bookings-drawer-title" className="font-serif text-2xl font-medium">Your Reservations</h3>
               </div>
               <button
+                type="button"
                 onClick={() => setMyBookingsOpen(false)}
+                aria-label="Close reservations"
                 className="rounded-full p-2 text-white/60 hover:bg-white/10 hover:text-white"
               >
-                <X size={22} />
+                <X size={22} aria-hidden="true" />
               </button>
             </div>
 
@@ -493,9 +576,9 @@ export default function App() {
 
                     <h4 className="mt-3 font-serif text-xl text-white">{item.name}</h4>
 
-                    <div className="mt-4 grid grid-cols-2 gap-3 text-xs text-white/70">
+                    <div className="mt-4 grid grid-cols-2 gap-3 text-xs text-white/75">
                       <div>
-                        <span className="block text-white/40 uppercase tracking-wider text-[10px]">
+                        <span className="block text-white/65 uppercase tracking-wider text-[10px]">
                           Date & Time
                         </span>
                         <span className="font-medium text-white">
@@ -503,33 +586,34 @@ export default function App() {
                         </span>
                       </div>
                       <div>
-                        <span className="block text-white/40 uppercase tracking-wider text-[10px]">
+                        <span className="block text-white/65 uppercase tracking-wider text-[10px]">
                           Party Size
                         </span>
                         <span className="font-medium text-white">{item.guests} Guests</span>
                       </div>
                       <div className="col-span-2">
-                        <span className="block text-white/40 uppercase tracking-wider text-[10px]">
+                        <span className="block text-white/65 uppercase tracking-wider text-[10px]">
                           Seating Area
                         </span>
                         <span className="font-medium text-[#c8ad72]">{item.seatingArea}</span>
                       </div>
                       {item.notes && (
-                        <div className="col-span-2 text-white/50 italic">"{item.notes}"</div>
+                        <div className="col-span-2 text-white/70 italic">"{item.notes}"</div>
                       )}
                     </div>
 
                     {item.status === "confirmed" && (
                       <div className="mt-5 flex justify-end border-t border-white/10 pt-4">
                         <button
+                          type="button"
                           disabled={cancellingId === item.id}
                           onClick={() => handleCancelReservation(item.id)}
                           className="flex items-center gap-1.5 text-xs font-semibold text-red-400 hover:text-red-300 disabled:opacity-50"
                         >
                           {cancellingId === item.id ? (
-                            <Loader2 size={14} className="animate-spin" />
+                            <Loader2 size={14} aria-hidden="true" className="animate-spin" />
                           ) : (
-                            <Trash2 size={14} />
+                            <Trash2 size={14} aria-hidden="true" />
                           )}
                           <span>Cancel Reservation</span>
                         </button>
@@ -562,6 +646,10 @@ export default function App() {
             style={{ y: heroY, scale: heroScale }}
             src="./images/hero.jpg"
             alt="Beautifully plated gourmet dish in a modern fine dining setting"
+            width={1024}
+            height={1536}
+            fetchPriority="high"
+            decoding="async"
             className="absolute inset-0 h-full w-full object-cover opacity-80"
           />
           <div className="absolute inset-0 bg-[radial-gradient(circle_at_74%_30%,rgba(200,173,114,0.16),transparent_32%),linear-gradient(90deg,rgba(25,23,20,0.92),rgba(25,23,20,0.58)_43%,rgba(25,23,20,0.15))]" />
@@ -573,7 +661,7 @@ export default function App() {
             variants={{ show: { transition: { staggerChildren: 0.14 } } }}
             className="relative z-10 mx-auto w-full max-w-7xl px-5 lg:px-8"
           >
-            <motion.p variants={fadeUp} className={`mb-7 text-xs font-bold uppercase tracking-[0.42em] ${accentGold}`}>
+            <motion.p variants={fadeUp} className="mb-7 text-xs font-bold uppercase tracking-[0.42em] text-[#c8ad72]">
               Seasonal tasting room • {isDaylight ? "Daylight Service" : "Evening Service"}
             </motion.p>
             <motion.h1
@@ -607,7 +695,7 @@ export default function App() {
         </section>
 
         {/* Experience Section */}
-        <section id="experience" className={`relative py-24 lg:py-32 transition-colors duration-500 ${experienceBg}`}>
+        <section id="experience" className={`relative scroll-mt-20 py-24 lg:py-32 transition-colors duration-500 ${experienceBg}`}>
           <div className="mx-auto grid max-w-7xl gap-14 px-5 lg:grid-cols-[0.85fr_1.15fr] lg:gap-20 lg:px-8">
             <motion.div
               initial={{ opacity: 0, x: -42 }}
@@ -634,22 +722,26 @@ export default function App() {
                 <img
                   src="./images/wine-glass.jpg"
                   alt="Red wine near window light"
+                  width={1536}
+                  height={1024}
+                  loading="lazy"
+                  decoding="async"
                   className="aspect-[4/5] h-full w-full object-cover transition duration-700 hover:scale-105"
                 />
               </div>
               <div className="flex flex-col justify-between gap-10 border-l border-current/15 pl-8">
-                <p className="text-lg font-light leading-8 opacity-75">
+                <p className="text-lg font-light leading-8 opacity-85">
                   Every plate is edited with restraint: refined technique, seasonal produce, and a
                   dining room designed for unhurried conversation.
                 </p>
                 <div>
-                  <div className={`flex gap-1 ${accentGold}`}>
+                  <div className={`flex gap-1 ${accentGold}`} role="img" aria-label="5 out of 5 stars">
                     {[...Array(5)].map((_, index) => (
-                      <Star key={index} size={18} fill="currentColor" strokeWidth={0} />
+                      <Star key={index} size={18} fill="currentColor" strokeWidth={0} aria-hidden="true" />
                     ))}
                   </div>
                   <p className="mt-4 font-serif text-4xl">4.9 guest rating</p>
-                  <p className="mt-2 text-sm opacity-55">From private dinners and weekend service.</p>
+                  <p className="mt-2 text-sm opacity-75">From private dinners and weekend service.</p>
                 </div>
               </div>
             </motion.div>
@@ -657,7 +749,7 @@ export default function App() {
         </section>
 
         {/* Menu Section */}
-        <section id="menu" className={`py-24 lg:py-32 transition-colors duration-500 ${menuBg}`}>
+        <section id="menu" className={`scroll-mt-20 py-24 lg:py-32 transition-colors duration-500 ${menuBg}`}>
           <div className="mx-auto max-w-7xl px-5 lg:px-8">
             <motion.div
               initial="hidden"
@@ -666,31 +758,33 @@ export default function App() {
               variants={{ show: { transition: { staggerChildren: 0.12 } } }}
               className="max-w-3xl"
             >
-              <motion.p variants={fadeUp} className="text-xs font-bold uppercase tracking-[0.34em] text-[#7a8e70]">
+              <motion.p variants={fadeUp} className={`text-xs font-bold uppercase tracking-[0.34em] ${accentSage}`}>
                 Chef's edit
               </motion.p>
               <motion.h2 variants={fadeUp} className="mt-5 font-serif text-5xl font-medium leading-none tracking-[-0.04em] lg:text-7xl">
                 A tighter, brighter menu.
               </motion.h2>
-              <motion.p variants={fadeUp} className="mt-6 max-w-2xl text-lg font-light leading-8 opacity-70">
+              <motion.p variants={fadeUp} className="mt-6 max-w-2xl text-lg font-light leading-8 opacity-80">
                 Seasonal dishes served with clarity. Select a course to preview the plate and browse
                 the current offering.
               </motion.p>
             </motion.div>
 
-            <div className="mt-14 flex flex-wrap gap-3 border-b border-current/10 pb-6">
+            <div className="mt-14 flex flex-wrap gap-3 border-b border-current/10 pb-6" role="group" aria-label="Menu categories">
               {categories.map((category) => (
                 <button
                   key={category}
+                  type="button"
+                  aria-pressed={activeCategory === category}
                   onClick={() => setActiveCategory(category)}
                   className={`rounded-full px-6 py-3 text-xs font-bold uppercase tracking-[0.22em] transition ${
                     activeCategory === category
                       ? isDaylight
-                        ? "bg-[#9e7d3b] text-white shadow-md font-bold"
+                        ? "bg-[#785c23] text-white shadow-md font-bold"
                         : "bg-[#c8ad72] text-[#191714] shadow-md font-bold"
                       : isDaylight
-                      ? "bg-[#2c2720]/8 text-[#2c2720]/75 hover:bg-[#2c2720]/15 hover:text-[#2c2720]"
-                      : "bg-white/10 text-white/75 hover:bg-white/20 hover:text-white"
+                      ? "bg-[#2c2720]/10 text-[#2c2720]/85 hover:bg-[#2c2720]/15 hover:text-[#2c2720]"
+                      : "bg-white/10 text-white/80 hover:bg-white/20 hover:text-white"
                   }`}
                 >
                   {category}
@@ -709,6 +803,10 @@ export default function App() {
                 <img
                   src={featuredDish.image}
                   alt={featuredDish.name}
+                  width={1536}
+                  height={1024}
+                  loading="lazy"
+                  decoding="async"
                   className="aspect-[4/5] w-full object-cover lg:aspect-[5/6]"
                 />
               </motion.div>
@@ -717,13 +815,15 @@ export default function App() {
                 {currentItems.map((item, index) => (
                   <button
                     key={item.name}
+                    type="button"
+                    aria-pressed={activeDish === index}
                     onMouseEnter={() => setActiveDish(index)}
                     onFocus={() => setActiveDish(index)}
                     onClick={() => setActiveDish(index)}
                     className={`group grid w-full grid-cols-[1fr_auto] gap-8 py-7 px-4 rounded-xl text-left transition duration-300 ${
                       activeDish === index
                         ? isDaylight
-                          ? "bg-[#9e7d3b]/10 border-l-4 border-[#9e7d3b]"
+                          ? "bg-[#785c23]/10 border-l-4 border-[#785c23]"
                           : "bg-[#c8ad72]/15 border-l-4 border-[#c8ad72]"
                         : "hover:bg-current/5 border-l-4 border-transparent"
                     }`}
@@ -731,22 +831,22 @@ export default function App() {
                     <span>
                       <span className="flex flex-wrap items-center gap-3">
                         <span className={`font-serif text-3xl font-medium tracking-[-0.03em] transition ${
-                          activeDish === index ? (isDaylight ? "text-[#9e7d3b]" : "text-[#c8ad72]") : ""
+                          activeDish === index ? (isDaylight ? "text-[#735824]" : "text-[#c8ad72]") : ""
                         }`}>
                           {item.name}
                         </span>
                         {item.tags?.map((tag) => (
-                          <span key={tag} className="inline-flex items-center gap-1 text-xs font-semibold uppercase tracking-[0.2em] text-[#7a8e70]">
-                            <Leaf size={13} />
+                          <span key={tag} className={`inline-flex items-center gap-1 text-xs font-semibold uppercase tracking-[0.2em] ${accentSage}`}>
+                            <Leaf size={13} aria-hidden="true" />
                             {tag}
                           </span>
                         ))}
                       </span>
-                      <span className="mt-3 block max-w-xl text-base font-light leading-7 opacity-75">
+                      <span className="mt-3 block max-w-xl text-base font-light leading-7 opacity-80">
                         {item.description}
                       </span>
                     </span>
-                    <span className={`font-serif text-2xl ${activeDish === index ? (isDaylight ? "text-[#9e7d3b]" : "text-[#c8ad72]") : "text-[#7a8e70]"}`}>{item.price}</span>
+                    <span className={`font-serif text-2xl ${activeDish === index ? (isDaylight ? "text-[#735824]" : "text-[#c8ad72]") : accentSage}`}>{item.price}</span>
                   </button>
                 ))}
               </div>
@@ -755,28 +855,28 @@ export default function App() {
         </section>
 
         {/* Reservations Section with Real-Time Slots */}
-        <section id="reservations" className={`py-24 lg:py-32 transition-colors duration-500 ${resSectionBg}`}>
+        <section id="reservations" className={`scroll-mt-20 py-24 lg:py-32 transition-colors duration-500 ${resSectionBg}`}>
           <div className="mx-auto grid max-w-7xl gap-12 px-5 lg:grid-cols-[0.85fr_1.15fr] lg:gap-16 lg:px-8">
             <div>
-              <p className="text-xs font-bold uppercase tracking-[0.34em] text-[#7a8e70]">
+              <p className={`text-xs font-bold uppercase tracking-[0.34em] ${accentSage}`}>
                 Reservations & Live Slots
               </p>
               <h2 className="mt-5 font-serif text-5xl font-medium leading-none tracking-[-0.04em] lg:text-7xl">
                 An evening worth planning.
               </h2>
-              <p className="mt-7 max-w-md text-lg font-light leading-8 opacity-75">
+              <p className="mt-7 max-w-md text-lg font-light leading-8 opacity-80">
                 Select your preferred date, party size, and seating area. Real-time availability for
                 tables is updated instantly below.
               </p>
-              <div className="mt-10 space-y-4 text-sm opacity-85">
+              <div className="mt-10 space-y-4 text-sm opacity-90">
                 <p className="flex items-center gap-3">
-                  <Clock size={18} className="text-[#7a8e70]" /> Mon-Thu 5pm-10pm | Fri-Sat 5pm-11pm
+                  <Clock size={18} aria-hidden="true" className={accentSage} /> Mon-Thu 5pm-10pm | Fri-Sat 5pm-11pm
                 </p>
                 <p className="flex items-center gap-3">
-                  <Wine size={18} className="text-[#7a8e70]" /> Wine pairing & Sommelier service available
+                  <Wine size={18} aria-hidden="true" className={accentSage} /> Wine pairing & Sommelier service available
                 </p>
                 <p className="flex items-center gap-3">
-                  <Info size={18} className="text-[#7a8e70]" /> Instant confirmation & local booking code
+                  <Info size={18} aria-hidden="true" className={accentSage} /> Instant confirmation & local booking code
                 </p>
               </div>
             </div>
@@ -792,8 +892,8 @@ export default function App() {
               {confirmedBooking ? (
                 <div className="grid min-h-[480px] place-items-center text-center">
                   <div className="max-w-md">
-                    <div className="mx-auto grid h-16 w-16 place-items-center rounded-full bg-[#7a8e70] text-white">
-                      <CheckCircle2 size={32} />
+                    <div className="mx-auto grid h-16 w-16 place-items-center rounded-full bg-[#4b5e43] text-white">
+                      <CheckCircle2 size={32} aria-hidden="true" />
                     </div>
                     <h3 className="mt-6 font-serif text-4xl">Reservation Confirmed</h3>
                     <p className={`mt-2 text-xs uppercase tracking-widest ${accentGold}`}>
@@ -823,12 +923,14 @@ export default function App() {
 
                     <div className="mt-8 flex gap-3">
                       <button
+                        type="button"
                         onClick={() => setConfirmedBooking(null)}
                         className="flex-1 rounded-full border border-current/20 py-3.5 text-xs font-bold uppercase tracking-wider transition hover:bg-current/10"
                       >
                         Book Another
                       </button>
                       <button
+                        type="button"
                         onClick={() => {
                           setConfirmedBooking(null);
                           setMyBookingsOpen(true);
@@ -843,7 +945,14 @@ export default function App() {
               ) : (
                 <form onSubmit={handleReservationSubmit} className="grid gap-6">
                   {formError && (
-                    <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-4 text-xs text-red-400">
+                    <div
+                      role="alert"
+                      className={`rounded-xl border p-4 text-xs font-medium ${
+                        isDaylight
+                          ? "border-red-700/30 bg-red-500/10 text-red-700"
+                          : "border-red-500/30 bg-red-500/10 text-red-400"
+                      }`}
+                    >
                       {formError}
                     </div>
                   )}
@@ -851,14 +960,16 @@ export default function App() {
                   {/* Date & Guests Picker */}
                   <div className="grid gap-4 sm:grid-cols-2">
                     <div>
-                      <label className={`mb-2 flex items-center gap-2 text-xs font-bold uppercase tracking-wider ${accentGold}`}>
-                        <Calendar size={14} /> Dining Date
+                      <label htmlFor="reservation-date" className={`mb-2 flex items-center gap-2 text-xs font-bold uppercase tracking-wider ${accentGold}`}>
+                        <Calendar size={14} aria-hidden="true" /> Dining Date
                       </label>
                       <input
+                        id="reservation-date"
+                        name="date"
                         required
                         type="date"
                         value={resDate}
-                        min={new Date().toISOString().split("T")[0]}
+                        min={getLocalDateString(0)}
                         onChange={(e) => setResDate(e.target.value)}
                         className={`w-full rounded-xl border px-4 py-3.5 text-sm outline-none transition ${
                           isDaylight ? "[color-scheme:light]" : "[color-scheme:dark]"
@@ -866,10 +977,12 @@ export default function App() {
                       />
                     </div>
                     <div>
-                      <label className={`mb-2 flex items-center gap-2 text-xs font-bold uppercase tracking-wider ${accentGold}`}>
-                        <Users size={14} /> Guests
+                      <label htmlFor="reservation-guests" className={`mb-2 flex items-center gap-2 text-xs font-bold uppercase tracking-wider ${accentGold}`}>
+                        <Users size={14} aria-hidden="true" /> Guests
                       </label>
                       <select
+                        id="reservation-guests"
+                        name="guests"
                         value={resGuests}
                         onChange={(e) => setResGuests(Number(e.target.value))}
                         className={`w-full rounded-xl border px-4 py-3.5 text-sm outline-none transition ${selectStyle}`}
@@ -885,27 +998,30 @@ export default function App() {
 
                   {/* Seating Area Selection */}
                   <div>
-                    <label className={`mb-2.5 block text-xs font-bold uppercase tracking-wider ${accentGold}`}>
+                    <span id="seating-area-label" className={`mb-2.5 block text-xs font-bold uppercase tracking-wider ${accentGold}`}>
                       Seating Atmosphere
-                    </label>
-                    <div className="grid gap-2.5 sm:grid-cols-2">
+                    </span>
+                    <div role="group" aria-labelledby="seating-area-label" className="grid gap-2.5 sm:grid-cols-2">
                       {seatingAreas.map((area) => (
                         <button
                           key={area.id}
                           type="button"
+                          aria-pressed={resSeating === area.id}
                           onClick={() => setResSeating(area.id)}
                           className={`rounded-xl border p-3.5 text-left transition ${
                             resSeating === area.id
                               ? isDaylight
-                                ? "border-[#9e7d3b] bg-[#9e7d3b]/15 text-[#2c2720] ring-1 ring-[#9e7d3b] font-bold"
+                                ? "border-[#785c23] bg-[#785c23]/12 text-[#2c2720] ring-1 ring-[#785c23] font-bold"
                                 : "border-[#c8ad72] bg-[#c8ad72]/20 text-white ring-1 ring-[#c8ad72] font-bold"
                               : isDaylight
-                              ? "border-black/10 bg-black/[0.02] text-[#2c2720]/75 hover:border-black/25"
-                              : "border-white/10 bg-white/[0.03] text-white/70 hover:border-white/20"
+                              ? "border-black/15 bg-black/[0.02] text-[#2c2720] hover:border-black/30"
+                              : "border-white/10 bg-white/[0.03] text-white/85 hover:border-white/25"
                           }`}
                         >
                           <div className="text-xs font-bold">{area.label}</div>
-                          <div className="mt-1 text-[11px] opacity-60">{area.desc}</div>
+                          <div className={`mt-1 text-[11px] font-normal ${isDaylight ? "text-[#2c2720]/75" : "text-white/70"}`}>
+                            {area.desc}
+                          </div>
                         </button>
                       ))}
                     </div>
@@ -914,17 +1030,17 @@ export default function App() {
                   {/* Real-time Time Slots Selector */}
                   <div>
                     <div className="mb-2.5 flex items-center justify-between">
-                      <label className={`text-xs font-bold uppercase tracking-wider ${accentGold}`}>
+                      <span id="time-slots-label" className={`text-xs font-bold uppercase tracking-wider ${accentGold}`}>
                         Real-Time Time Slots
-                      </label>
+                      </span>
                       {loadingSlots && (
-                        <span className="flex items-center gap-1 text-[11px] opacity-60">
-                          <Loader2 size={12} className="animate-spin" /> Fetching slots...
+                        <span className="flex items-center gap-1 text-[11px] opacity-75">
+                          <Loader2 size={12} aria-hidden="true" className="animate-spin" /> Fetching slots...
                         </span>
                       )}
                     </div>
 
-                    <div className="grid grid-cols-3 gap-2 sm:grid-cols-3">
+                    <div role="group" aria-labelledby="time-slots-label" className="grid grid-cols-3 gap-2 sm:grid-cols-3">
                       {timeSlots.map((slot) => {
                         const isSelected = selectedTime === slot.time;
                         const isBooked = slot.status === "booked";
@@ -934,18 +1050,19 @@ export default function App() {
                             key={slot.time}
                             type="button"
                             disabled={isBooked}
+                            aria-pressed={isSelected}
                             onClick={() => setSelectedTime(slot.time)}
                             className={`relative rounded-xl border p-3 text-center transition ${
                               isBooked
                                 ? isDaylight
-                                  ? "cursor-not-allowed border-black/5 bg-black/[0.02] opacity-35 line-through text-[#2c2720]/40"
-                                  : "cursor-not-allowed border-white/5 bg-white/[0.01] opacity-35 line-through text-white/40"
+                                  ? "cursor-not-allowed border-black/10 bg-black/[0.04] line-through text-[#2c2720]/65"
+                                  : "cursor-not-allowed border-white/10 bg-white/[0.02] line-through text-white/50"
                                 : isSelected
                                 ? isDaylight
-                                  ? "border-[#9e7d3b] bg-[#9e7d3b] font-bold text-white shadow-md"
+                                  ? "border-[#785c23] bg-[#785c23] font-bold text-white shadow-md"
                                   : "border-[#c8ad72] bg-[#c8ad72] font-bold text-[#191714] shadow-lg"
                                 : isDaylight
-                                ? "border-black/15 bg-white text-[#2c2720] hover:border-[#9e7d3b]"
+                                ? "border-black/20 bg-white text-[#2c2720] hover:border-[#785c23]"
                                 : "border-white/15 bg-white/[0.04] text-white hover:border-[#c8ad72]/60"
                             }`}
                           >
@@ -957,11 +1074,15 @@ export default function App() {
                                     ? "text-white"
                                     : "text-[#191714]"
                                   : slot.status === "limited"
-                                  ? "text-amber-500"
+                                  ? isDaylight
+                                    ? "text-amber-700"
+                                    : "text-amber-400"
                                   : slot.status === "booked"
-                                  ? "text-red-400"
+                                  ? isDaylight
+                                    ? "text-red-700"
+                                    : "text-red-400"
                                   : isDaylight
-                                  ? "text-[#6e8568]"
+                                  ? "text-[#4b5e43]"
                                   : "text-[#8fa892]"
                               }`}
                             >
@@ -979,39 +1100,70 @@ export default function App() {
 
                   {/* Personal Contact Details */}
                   <div className="grid gap-3 sm:grid-cols-3">
-                    <input
-                      required
-                      type="text"
-                      placeholder="Full Name"
-                      value={resName}
-                      onChange={(e) => setResName(e.target.value)}
-                      className={`rounded-xl border px-4 py-3.5 text-sm outline-none transition ${formInputStyle}`}
-                    />
-                    <input
-                      required
-                      type="email"
-                      placeholder="Email Address"
-                      value={resEmail}
-                      onChange={(e) => setResEmail(e.target.value)}
-                      className={`rounded-xl border px-4 py-3.5 text-sm outline-none transition ${formInputStyle}`}
-                    />
-                    <input
-                      required
-                      type="tel"
-                      placeholder="Phone Number"
-                      value={resPhone}
-                      onChange={(e) => setResPhone(e.target.value)}
-                      className={`rounded-xl border px-4 py-3.5 text-sm outline-none transition ${formInputStyle}`}
-                    />
+                    <div>
+                      <label htmlFor="reservation-name" className="sr-only">
+                        Full Name
+                      </label>
+                      <input
+                        id="reservation-name"
+                        name="name"
+                        autoComplete="name"
+                        required
+                        type="text"
+                        placeholder="Full Name"
+                        value={resName}
+                        onChange={(e) => setResName(e.target.value)}
+                        className={`w-full rounded-xl border px-4 py-3.5 text-sm outline-none transition ${formInputStyle}`}
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor="reservation-email" className="sr-only">
+                        Email Address
+                      </label>
+                      <input
+                        id="reservation-email"
+                        name="email"
+                        autoComplete="email"
+                        required
+                        type="email"
+                        placeholder="Email Address"
+                        value={resEmail}
+                        onChange={(e) => setResEmail(e.target.value)}
+                        className={`w-full rounded-xl border px-4 py-3.5 text-sm outline-none transition ${formInputStyle}`}
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor="reservation-phone" className="sr-only">
+                        Phone Number
+                      </label>
+                      <input
+                        id="reservation-phone"
+                        name="phone"
+                        autoComplete="tel"
+                        required
+                        type="tel"
+                        placeholder="Phone Number"
+                        value={resPhone}
+                        onChange={(e) => setResPhone(e.target.value)}
+                        className={`w-full rounded-xl border px-4 py-3.5 text-sm outline-none transition ${formInputStyle}`}
+                      />
+                    </div>
                   </div>
 
-                  <textarea
-                    rows={3}
-                    placeholder="Special requests, dietary preferences, or occasion (optional)"
-                    value={resNotes}
-                    onChange={(e) => setResNotes(e.target.value)}
-                    className={`rounded-xl border px-4 py-3.5 text-sm outline-none transition ${formInputStyle}`}
-                  />
+                  <div>
+                    <label htmlFor="reservation-notes" className="sr-only">
+                      Special requests, dietary preferences, or occasion
+                    </label>
+                    <textarea
+                      id="reservation-notes"
+                      name="notes"
+                      rows={3}
+                      placeholder="Special requests, dietary preferences, or occasion (optional)"
+                      value={resNotes}
+                      onChange={(e) => setResNotes(e.target.value)}
+                      className={`w-full rounded-xl border px-4 py-3.5 text-sm outline-none transition ${formInputStyle}`}
+                    />
+                  </div>
 
                   <button
                     disabled={isSubmitting || !selectedTime}
@@ -1020,7 +1172,7 @@ export default function App() {
                   >
                     {isSubmitting ? (
                       <>
-                        <Loader2 size={16} className="animate-spin" /> Confirming Reservation...
+                        <Loader2 size={16} aria-hidden="true" className="animate-spin" /> Confirming Reservation...
                       </>
                     ) : (
                       "Confirm & Reserve Table"
@@ -1034,54 +1186,62 @@ export default function App() {
       </main>
 
       {/* Footer */}
-      <footer id="contact" className={`py-16 transition-colors duration-500 ${footerBg}`}>
+      <footer id="contact" className={`scroll-mt-20 py-16 transition-colors duration-500 ${footerBg}`}>
         <div className="mx-auto max-w-7xl px-5 lg:px-8">
           <div className="grid gap-12 border-b border-white/10 pb-12 lg:grid-cols-[1.1fr_0.8fr_0.8fr_0.7fr]">
             <div>
               <BrandMark />
-              <p className="mt-6 max-w-sm text-sm font-light leading-7 text-white/56">
+              <p className="mt-6 max-w-sm text-sm font-light leading-7 text-white/75">
                 Modern fine dining shaped by seasonal produce, quiet luxury, and thoughtful service.
               </p>
             </div>
             <div>
-              <h4 className={`text-xs font-bold uppercase tracking-[0.26em] ${accentGold}`}>Visit</h4>
-              <div className="mt-5 space-y-4 text-sm text-white/62">
+              <h3 className="text-xs font-bold uppercase tracking-[0.26em] text-[#c8ad72]">Visit</h3>
+              <div className="mt-5 space-y-4 text-sm text-white/75">
                 <p className="flex gap-3">
-                  <MapPin size={18} className={`shrink-0 ${accentGold}`} /> 123 Culinary Street, Foodie City
+                  <MapPin size={18} aria-hidden="true" className="shrink-0 text-[#c8ad72]" /> {siteConfig.address}
                 </p>
                 <p className="flex gap-3">
-                  <Phone size={18} className={`shrink-0 ${accentGold}`} /> (123) 456-7890
+                  <Phone size={18} aria-hidden="true" className="shrink-0 text-[#c8ad72]" />
+                  <a href={siteConfig.phoneHref} className="transition hover:text-[#c8ad72]">
+                    {siteConfig.phoneDisplay}
+                  </a>
                 </p>
                 <p className="flex gap-3">
-                  <Mail size={18} className={`shrink-0 ${accentGold}`} /> hello@vellora-dining.com
+                  <Mail size={18} aria-hidden="true" className="shrink-0 text-[#c8ad72]" />
+                  <a href={siteConfig.emailHref} className="transition hover:text-[#c8ad72]">
+                    {siteConfig.email}
+                  </a>
                 </p>
               </div>
             </div>
             <div>
-              <h4 className={`text-xs font-bold uppercase tracking-[0.26em] ${accentGold}`}>Hours</h4>
-              <div className="mt-5 space-y-3 text-sm text-white/62">
-                <p>Mon-Thu: 5pm-10pm</p>
-                <p>Fri-Sat: 5pm-11pm</p>
-                <p>Sunday: 4pm-9pm</p>
+              <h3 className="text-xs font-bold uppercase tracking-[0.26em] text-[#c8ad72]">Hours</h3>
+              <div className="mt-5 space-y-3 text-sm text-white/75">
+                {siteConfig.hours.map((entry) => (
+                  <p key={entry}>{entry}</p>
+                ))}
               </div>
             </div>
             <div>
-              <h4 className={`text-xs font-bold uppercase tracking-[0.26em] ${accentGold}`}>Social</h4>
+              <h3 className="text-xs font-bold uppercase tracking-[0.26em] text-[#c8ad72]">Social</h3>
               <div className="mt-5 flex gap-3">
-                {["IG", "FB", "WL"].map((label) => (
+                {siteConfig.socialLinks.map((social) => (
                   <a
-                    key={label}
-                    href="#"
-                    className="grid h-11 w-11 place-items-center rounded-full border border-white/12 text-xs font-bold text-white/70 transition hover:border-[#c8ad72] hover:text-[#c8ad72]"
+                    key={social.shortLabel}
+                    href={social.href}
+                    aria-label={social.name}
+                    title={social.name}
+                    className="grid h-11 w-11 place-items-center rounded-full border border-white/15 text-xs font-bold text-white/80 transition hover:border-[#c8ad72] hover:text-[#c8ad72]"
                   >
-                    {label}
+                    {social.shortLabel}
                   </a>
                 ))}
               </div>
             </div>
           </div>
-          <div className="flex flex-col justify-between gap-4 pt-8 text-xs text-white/42 sm:flex-row">
-            <p>Copyright {new Date().getFullYear()} Vellora Fine Dining. All rights reserved.</p>
+          <div className="flex flex-col justify-between gap-4 pt-8 text-xs text-white/65 sm:flex-row">
+            <p>Copyright {new Date().getFullYear()} {siteConfig.brandName}. All rights reserved.</p>
             <p>Private dining and custom menus available on request.</p>
           </div>
         </div>

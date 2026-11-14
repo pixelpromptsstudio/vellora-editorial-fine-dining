@@ -57,8 +57,8 @@ editorial-food-photography-prompts/
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/dhruvvv-kush/Vellora-Luxury-Editorial-Fine-Dining-Experience.git
-   cd Vellora-Luxury-Editorial-Fine-Dining-Experience
+   git clone https://github.com/pixelpromptsstudio/vellora-editorial-fine-dining.git
+   cd vellora-editorial-fine-dining
    ```
 
 2. **Install dependencies:**
